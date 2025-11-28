@@ -62,6 +62,13 @@ IGNORE_LIST = ['Semeno', 'Gabriel']
 import numpy as np
 from playerTypes import *
 import matplotlib.pyplot as plt
+import itertools
+from tqdm import tqdm
+from PIL import Image, ImageDraw, ImageFont, ImageOps
+import pandas as pd
+import os
+
+
 
 FILENAME = "fpl_player_data_with_weekly_points.csv"
 
@@ -113,6 +120,13 @@ def set_my_team(goalies, defs, middies, strikes):
             my_team[MY_TEAM_IDS[i]] = strikes[MY_TEAM_IDS[i]]
     return my_team
 
+def projected_score(p):
+    # lower difficulty = easier fixture
+    diff_factor = 1.2 - 0.1 * min(max(p.next_fixture_difficulty / 100, 0), 1)
+    recent_points = 0.6*p.points_per_GW[-1] + 0.3*p.points_per_GW[-2] + 0.1*p.points_per_GW[-3]
+    base = 0.5*p.ep_next + 0.3*recent_points + 0.2*p.form
+    return base * diff_factor
+
 def pick_best_lineup_auto(my_team):
     """
     Automatically pick the best FPL lineup, formation, and captain/vice-captain.
@@ -133,12 +147,6 @@ def pick_best_lineup_auto(my_team):
     defenders   = [p for p in my_team.values() if p.playerType == 'DEF']
     midfielders = [p for p in my_team.values() if p.playerType == 'MID']
     forwards    = [p for p in my_team.values() if p.playerType == 'FWD']
-
-    # --- Scoring function ---
-    def projected_score(player):
-        if player.status != 'Available':
-            return -10.0
-        return player.ep_next  # using ep_next as the key expected points metric
 
     # --- Sort each category ---
     goalkeepers.sort(key=projected_score, reverse=True)
@@ -260,129 +268,6 @@ def print_optimal_team(my_team):
     print("=" * max_width)
 
 
-    
-
-def suggest_optimal_transfer(my_team, all_players, budget_excess=0.5, force=None, ignore=None):
-    """
-    Suggest the single most optimal transfer from your current squad.
-    Allows selling unavailable players, but only buys available ones.
-
-    Parameters
-    ----------
-    my_team : Players
-        Your 15-man squad (Players dictionary).
-    all_players : Players
-        Dictionary of all available players (from all positions).
-    budget_excess : float
-        Extra budget in millions available to spend (e.g. 0.5 = £0.5M extra).
-
-    Returns
-    -------
-    dict
-        {
-            'out': Player to sell,
-            'in': Player to buy,
-            'gain': float (expected points gain),
-            'cost_diff': float (cost increase),
-            'new_ep_next': float (expected points of incoming),
-            'in_status': str (status of incoming player)
-        }
-    """
-
-    # --- Scoring function (same weighting as lineup logic) ---
-    def projected_score(player):
-        """Estimate performance potential, with minor penalty for unavailability."""
-        base_score = 0.5 * player.ep_next + 0.2 * player.form + 0.1 * player.normalised_points + 0.2 * player.total_points
-
-        # Heavily penalise unavailable players for accurate comparisons
-        if player.status == 'Available':
-            return base_score
-        elif player.status == 'Doubtful':
-            return base_score * 0.7
-        elif player.status == 'Injured':
-            return base_score * 0.4
-        elif player.status == 'Suspended':
-            return base_score * 0.3
-        else:
-            return base_score * 0.2
-
-    best_gain = -1.0
-    best_trade = None
-    candidates = Players()
-    
-    if force != None:
-        for candidate in force:
-            candidates[candidate] = my_team[candidate]
-    elif ignore != None:
-        candidates = Players(my_team.copy())
-        for candidate in ignore:
-            temp = candidates.pop(candidate)
-    else:
-        candidates = Players(my_team.copy())
-    
-    
-    team_count = {}
-    for player in my_team.values():
-        team = player.team_id 
-        if team in team_count:
-            team_count[team] += 1
-        else:
-            team_count[team] = 1
-    
-    
-    # --- Loop through your current squad (anyone can be sold) ---
-    for outgoing_player in candidates.values():
-        position_type = outgoing_player.playerType
-        current_score = projected_score(outgoing_player)
-        current_cost = outgoing_player.now_cost
-        
-        # Search only *available* replacements of the same position
-        for candidate in all_players.values():
-            if candidate.playerType != position_type:
-                continue
-            if candidate.id in my_team.keys():
-                continue
-            if candidate.status != 'Available':
-                continue  # only buy available players
-            if candidate.now_cost > current_cost + budget_excess:
-                continue  # outside your budget
-            if candidate.team_id in team_count:
-                if team_count[candidate.team_id] > 2:
-                    continue
-
-            # Calculate expected improvement
-            gain = projected_score(candidate) - current_score
-            if gain > best_gain:
-                cost_diff = candidate.now_cost - current_cost
-                best_trade = {
-                    'out': outgoing_player,
-                    'in': candidate,
-                    'gain': candidate.ep_next - outgoing_player.ep_next,
-                    'cost_diff': cost_diff,
-                    'new_ep_next': candidate.ep_next,
-                    'in_status': candidate.status
-                }
-                best_gain = gain
-
-    return best_trade
-
-
-def print_optimal_trade(my_team, all_players, budget_excess, force=None, ignore=None):
-    trade = suggest_optimal_transfer(my_team, all_players, budget_excess, force, ignore)
-    
-    print("\n=== Optimal Transfer Suggestion ===")
-    if trade:
-        print(f"Sell: {trade['out'].name} (£{trade['out'].now_cost}M, {trade['out'].status})")
-        print(f"Buy:  {trade['in'].name} (£{trade['in'].now_cost}M, {trade['in'].team})")
-        print(f"Expected Points Gain: {trade['gain']:.2f}")
-        print(f"Budget Change: {-1 * trade['cost_diff']:+.2f}M")
-        print(f"New Player Projected Points: {trade['new_ep_next']:.2f}")
-    else:
-        print("No beneficial trades found within budget.")
-
-import itertools
-from tqdm import tqdm
-
 def suggest_optimal_transfers(
     my_team, all_players,
     budget_excess=0.5,
@@ -392,20 +277,13 @@ def suggest_optimal_transfers(
     improvement_threshold=0.3,
     show_progress=True,
     print_lineup=False
-):
+    ):
     """
     Search for the best combination of transfers (free + optional paid),
     prune low-value candidates, and print new optimal lineup.
 
     Prevents buying the same player twice.
     """
-
-    def projected_score(p):
-        # lower difficulty = easier fixture
-        diff_factor = 1.2 - 0.1 * min(max(p.next_fixture_difficulty / 100, 0), 1)
-        recent_points = 0.6*p.points_per_GW[-1] + 0.3*p.points_per_GW[-2] + 0.1*p.points_per_GW[-3]
-        base = 0.5*p.ep_next + 0.3*recent_points + 0.2*p.form
-        return base * diff_factor
 
 
     # ---- Step 1: prune dataset ----
@@ -559,24 +437,6 @@ def suggest_optimal_transfers(
         print("=" * max_width)
 
     return new_team
-
-def print_optimal_transfers(my_team, all_players, budget_excess=0.5, num_free_transfers=1, force=None, ignore=None):
-    trades = suggest_optimal_transfers(my_team, all_players, budget_excess, num_free_transfers, force, ignore)
-    print(f"\n=== Optimal Transfer Suggestions ({num_free_transfers} free) ===")
-    if not trades:
-        print("No beneficial transfers found.")
-        return
-    for i, t in enumerate(trades, 1):
-        print(f"\nTrade {i}:")
-        print(f"  Sell: {t['out'].name} (£{t['out'].now_cost}M, {t['out'].status})")
-        print(f"  Buy:  {t['in'].name} (£{t['in'].now_cost}M, {t['in'].team})")
-        print(f"  Raw Gain: {t['gain']:+.2f} pts | Net Gain (after penalties): {t['net_gain']:+.2f} pts")
-        print(f"  Budget Change: {-1*t['cost_diff']:+.2f}M")
-    print(f"\nRemaining budget: £{trades[-1]['new_budget']:.2f}M")
-
-from PIL import Image, ImageDraw, ImageFont, ImageOps
-import pandas as pd
-import os
 
 def render_optimal_team_image(my_team, filename="team.png",
                               width=1800, height=2400,
@@ -768,19 +628,19 @@ def render_optimal_team_image(my_team, filename="team.png",
 
     return filename
 
-
-
-def print_data(data):
+def data_to_team(data):
+    
     global GKs
     global DEFs
     global MIDs
     global FWDs
     global my_team
-    global updated_team
+    
     GKs  = Players()
     DEFs = Players()
     MIDs = Players()
     FWDs = Players()
+    
     for row in data:
         if row[3] == '1':
             player = GK(row)
@@ -814,6 +674,10 @@ def print_data(data):
     
     global ALL_PLAYERS
     ALL_PLAYERS = all_players
+
+def output_data():
+    
+    global updated_team
     
     updated_team = suggest_optimal_transfers(
     my_team, ALL_PLAYERS,
@@ -825,16 +689,13 @@ def print_data(data):
     
     render_optimal_team_image(my_team, "my_lineup.png")
     render_optimal_team_image(updated_team, "updated_lineup.png")
-    # print(updated_team)
-    # print_optimal_transfers(my_team, all_players, BUDGET_EXCESS, num_free_transfers=FREE_TRANS) #ignore = ['Virgil', 'Wood']
-    
-    
     
 
 
 def main():
-    DATA = load_data()
-    print_data(DATA)
+    data = load_data()
+    data_to_team(data)
+    output_data()
 
 
 
