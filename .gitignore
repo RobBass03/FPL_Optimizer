@@ -3,6 +3,15 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Custom Ignore
+etypes.csv
+fixture_data.csv
+fpl_combined_weighted_points.csv
+fpl_player_data_with_weekly_points.csv
+my_lineup.png
+team_data.csv
+updated_lineup.png
+
 # C extensions
 *.so
 
